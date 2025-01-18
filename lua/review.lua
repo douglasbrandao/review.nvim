@@ -1,0 +1,81 @@
+local utils = require("utils")
+
+local buffers = {}
+
+local function mark_buffer()
+	local current_buffer = vim.api.nvim_get_current_buf()
+	if not utils.has_value(buffers, current_buffer) then
+		table.insert(buffers, current_buffer)
+		print("buffer marked: " .. current_buffer)
+	end
+	print(vim.inspect(buffers))
+end
+
+local function unmark_buffer()
+	local current_buffer = vim.api.nvim_get_current_buf()
+	for i, v in pairs(buffers) do
+		if v == current_buffer then
+			table.remove(buffers, i)
+			break
+		end
+	end
+	print("buffer unmarked: " .. current_buffer)
+	print(vim.inspect(buffers))
+end
+
+local function create_window(config)
+	local buf = vim.api.nvim_create_buf(false, true)
+	local win = vim.api.nvim_open_win(buf, true, config.opts)
+	return {
+		buf = buf,
+		win = win,
+	}
+end
+
+local function show_buffers()
+	--- Window config
+	local width = vim.o.columns
+	local height = vim.o.lines
+	local window_config = {
+		opts = {
+			relative = "editor",
+			width = width,
+			height = height,
+			row = math.floor(vim.o.columns - height) / 2,
+			col = math.floor(vim.o.lines - width) / 2,
+			style = "minimal",
+			border = "rounded", -- Optional: Add a border
+		},
+	}
+
+	--- Create window
+	local window = create_window(window_config)
+
+	--- List marked buffers
+	local lines = {}
+	for i, buffer in ipairs(buffers) do
+		local filename = vim.api.nvim_buf_get_name(buffer)
+		table.insert(lines, string.format("%d: %s", i, filename:match("^.+/(.+)$")))
+	end
+	vim.api.nvim_buf_set_lines(window.buf, 0, -1, false, lines)
+
+	-- Window buf must be non-editable
+	vim.api.nvim_buf_set_option(window.buf, "modifiable", false)
+	vim.api.nvim_buf_set_option(window.buf, "readonly", true)
+
+	vim.keymap.set("n", "<CR>", function()
+		--- Get floating window current line
+		local row_number, _ = unpack(vim.api.nvim_win_get_cursor(0))
+		--- Close window
+		vim.api.nvim_win_close(window.win, true)
+		--- Set current buffer w/ selected line
+		local buf_id = buffers[row_number]
+		vim.api.nvim_set_current_buf(buf_id)
+	end, {
+		buffer = window.buf,
+	})
+end
+
+vim.keymap.set("n", "<leader>ri", mark_buffer, { desc = "Insert buffer" })
+vim.keymap.set("n", "<leader>rr", unmark_buffer, { desc = "Remove buffer" })
+vim.keymap.set("n", "<leader>rl", show_buffers, { desc = "Show buffers" })
