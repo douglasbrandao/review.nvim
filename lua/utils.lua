@@ -2,7 +2,7 @@ local M = {}
 
 function M.has_value(tbl, value)
 	for _, v in pairs(tbl) do
-		if v == value then
+		if v.buf_id == value then
 			return true
 		end
 	end

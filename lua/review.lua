@@ -5,8 +5,8 @@ local buffers = {}
 local function mark_buffer()
 	local current_buffer = vim.api.nvim_get_current_buf()
 	if not utils.has_value(buffers, current_buffer) then
-		table.insert(buffers, current_buffer)
-		print("buffer marked: " .. current_buffer)
+		local buffer = { buf_id = current_buffer, is_marked = false }
+		table.insert(buffers, buffer)
 	end
 	print(vim.inspect(buffers))
 end
@@ -14,12 +14,26 @@ end
 local function unmark_buffer()
 	local current_buffer = vim.api.nvim_get_current_buf()
 	for i, v in pairs(buffers) do
-		if v == current_buffer then
+		if v.buf_id == current_buffer then
 			table.remove(buffers, i)
 			break
 		end
 	end
-	print("buffer unmarked: " .. current_buffer)
+	print(vim.inspect(buffers))
+end
+
+local function mark_file_as_reviewed()
+	local current_buffer = vim.api.nvim_get_current_buf()
+	for _, v in pairs(buffers) do
+		if v.buf_id == current_buffer then
+			if v.is_marked == true then
+				v.is_marked = false
+			else
+				v.is_marked = true
+			end
+			break
+		end
+	end
 	print(vim.inspect(buffers))
 end
 
@@ -54,8 +68,12 @@ local function show_buffers()
 	--- List marked buffers
 	local lines = {}
 	for i, buffer in ipairs(buffers) do
-		local filename = vim.api.nvim_buf_get_name(buffer)
-		table.insert(lines, string.format("%d: %s", i, filename:match("^.+/(.+)$")))
+		local filename = vim.api.nvim_buf_get_name(buffer.buf_id)
+		local marked_icon = "❌"
+		if buffer.is_marked then
+			marked_icon = "✅"
+		end
+		table.insert(lines, string.format("%d: %s - %s", i, marked_icon, filename:match("^.+/(.+)$")))
 	end
 	vim.api.nvim_buf_set_lines(window.buf, 0, -1, false, lines)
 
@@ -69,7 +87,7 @@ local function show_buffers()
 		--- Close window
 		vim.api.nvim_win_close(window.win, true)
 		--- Set current buffer w/ selected line
-		local buf_id = buffers[row_number]
+		local buf_id = buffers[row_number].buf_id
 		vim.api.nvim_set_current_buf(buf_id)
 	end, {
 		buffer = window.buf,
@@ -79,3 +97,4 @@ end
 vim.keymap.set("n", "<leader>ri", mark_buffer, { desc = "Insert buffer" })
 vim.keymap.set("n", "<leader>rr", unmark_buffer, { desc = "Remove buffer" })
 vim.keymap.set("n", "<leader>rl", show_buffers, { desc = "Show buffers" })
+vim.keymap.set("n", "<leader>rx", mark_file_as_reviewed, { desc = "Review file" })
