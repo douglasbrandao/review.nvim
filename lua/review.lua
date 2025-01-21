@@ -8,7 +8,6 @@ local function mark_buffer()
 		local buffer = { buf_id = current_buffer, is_marked = false }
 		table.insert(buffers, buffer)
 	end
-	print(vim.inspect(buffers))
 end
 
 local function unmark_buffer()
@@ -19,7 +18,6 @@ local function unmark_buffer()
 			break
 		end
 	end
-	print(vim.inspect(buffers))
 end
 
 local function mark_file_as_reviewed()
@@ -34,7 +32,6 @@ local function mark_file_as_reviewed()
 			break
 		end
 	end
-	print(vim.inspect(buffers))
 end
 
 local function create_window(config)
