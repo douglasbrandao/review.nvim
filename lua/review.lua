@@ -45,15 +45,15 @@ end
 
 local function show_buffers()
 	--- Window config
-	local width = vim.o.columns
-	local height = vim.o.lines
+	local width = 100
+	local height = 30
 	local window_config = {
 		opts = {
 			relative = "editor",
 			width = width,
 			height = height,
-			row = math.floor(vim.o.columns - height) / 2,
-			col = math.floor(vim.o.lines - width) / 2,
+			row = math.floor((vim.o.lines - height) / 2),
+			col = math.floor((vim.o.columns - width) / 2),
 			style = "minimal",
 			border = "rounded", -- Optional: Add a border
 		},
