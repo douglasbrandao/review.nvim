@@ -78,6 +78,13 @@ local function show_buffers()
 	vim.api.nvim_buf_set_option(window.buf, "modifiable", false)
 	vim.api.nvim_buf_set_option(window.buf, "readonly", true)
 
+	--- Close window when press "q"
+	vim.keymap.set("n", "q", function()
+		vim.api.nvim_win_close(window.win, true)
+	end, {
+		buffer = window.buf,
+	})
+
 	vim.keymap.set("n", "<CR>", function()
 		--- Get floating window current line
 		local row_number, _ = unpack(vim.api.nvim_win_get_cursor(0))
