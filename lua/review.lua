@@ -100,8 +100,8 @@ local function show_buffers()
 	vim.api.nvim_buf_set_lines(window.buf, 0, -1, false, lines)
 
 	-- Window buf must be non-editable
-	vim.api.nvim_buf_set_option(window.buf, "modifiable", false)
-	vim.api.nvim_buf_set_option(window.buf, "readonly", true)
+	vim.bo[window.buf].modifiable = false
+	vim.bo[window.buf].readonly = true
 
 	--- Close window when press "q"
 	vim.keymap.set("n", "q", function()
