@@ -23,6 +23,22 @@ M.config = {
 
 local buffers = {}
 
+-- Helper function to check if buffer is valid
+local function is_valid_buffer(buf_id)
+	return vim.api.nvim_buf_is_valid(buf_id) and vim.api.nvim_buf_is_loaded(buf_id)
+end
+
+-- Clean up invalid buffers from the list
+local function cleanup_invalid_buffers()
+	local valid_buffers = {}
+	for _, buffer in ipairs(buffers) do
+		if is_valid_buffer(buffer.buf_id) then
+			table.insert(valid_buffers, buffer)
+		end
+	end
+	buffers = valid_buffers
+end
+
 local function mark_buffer()
 	local current_buffer = vim.api.nvim_get_current_buf()
 	if not utils.has_value(buffers, current_buffer) then
@@ -47,6 +63,7 @@ local function unmark_buffer()
 end
 
 local function mark_file_as_reviewed()
+	cleanup_invalid_buffers()
 	local current_buffer = vim.api.nvim_get_current_buf()
 	for _, v in pairs(buffers) do
 		if v.buf_id == current_buffer then
@@ -69,6 +86,8 @@ local function create_window(config)
 end
 
 local function show_buffers()
+	cleanup_invalid_buffers()
+	
 	if #buffers == 0 then
 		vim.notify("No buffers in review list", vim.log.levels.WARN)
 		return
@@ -117,7 +136,11 @@ local function show_buffers()
 		vim.api.nvim_win_close(window.win, true)
 		--- Set current buffer w/ selected line
 		local buf_id = buffers[row_number].buf_id
-		vim.api.nvim_set_current_buf(buf_id)
+		if is_valid_buffer(buf_id) then
+			vim.api.nvim_set_current_buf(buf_id)
+		else
+			vim.notify("Buffer is no longer valid", vim.log.levels.ERROR)
+		end
 	end, {
 		buffer = window.buf,
 	})
