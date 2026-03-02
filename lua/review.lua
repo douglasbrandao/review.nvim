@@ -99,6 +99,16 @@ local function show_buffers()
 		return
 	end
 
+	-- Calculate statistics
+	local total = #buffers
+	local reviewed = 0
+	for _, buffer in ipairs(buffers) do
+		if buffer.is_marked then
+			reviewed = reviewed + 1
+		end
+	end
+	local percentage = math.floor((reviewed / total) * 100)
+
 	--- Window config
 	local window_config = {
 		opts = {
@@ -109,19 +119,33 @@ local function show_buffers()
 			col = math.floor((vim.o.columns - M.config.window.width) / 2),
 			style = "minimal",
 			border = M.config.window.border,
+			title = string.format(" Review List - %d/%d (%d%%) ", reviewed, total, percentage),
+			title_pos = "center",
 		},
 	}
 
 	--- Create window
 	local window = create_window(window_config)
 
-	--- List marked buffers
+	--- Build content with header and footer
 	local lines = {}
+	
+	-- Add separator line
+	table.insert(lines, string.rep("─", M.config.window.width - 2))
+	
+	-- List marked buffers
 	for i, buffer in ipairs(buffers) do
 		local filename = vim.api.nvim_buf_get_name(buffer.buf_id)
 		local marked_icon = buffer.is_marked and M.config.icons.reviewed or M.config.icons.not_reviewed
-		table.insert(lines, string.format("%d: %s - %s", i, marked_icon, filename:match("^.+/(.+)$")))
+		table.insert(lines, string.format("%d: %s - %s", i, marked_icon, filename:match("^.+/(.+)$") or filename))
 	end
+	
+	-- Add separator line
+	table.insert(lines, string.rep("─", M.config.window.width - 2))
+	
+	-- Add footer with help
+	table.insert(lines, " <CR>: Jump to buffer  |  q: Close ")
+	
 	vim.api.nvim_buf_set_lines(window.buf, 0, -1, false, lines)
 
 	-- Window buf must be non-editable
@@ -138,14 +162,21 @@ local function show_buffers()
 	vim.keymap.set("n", "<CR>", function()
 		--- Get floating window current line
 		local row_number, _ = unpack(vim.api.nvim_win_get_cursor(0))
-		--- Close window
-		vim.api.nvim_win_close(window.win, true)
-		--- Set current buffer w/ selected line
-		local buf_id = buffers[row_number].buf_id
-		if is_valid_buffer(buf_id) then
-			vim.api.nvim_set_current_buf(buf_id)
-		else
-			vim.notify("Buffer is no longer valid", vim.log.levels.ERROR)
+		
+		-- Calculate buffer index (accounting for separator line at top)
+		local buffer_index = row_number - 1
+		
+		-- Check if it's a valid buffer line (not separator or footer)
+		if buffer_index >= 1 and buffer_index <= #buffers then
+			--- Close window
+			vim.api.nvim_win_close(window.win, true)
+			--- Set current buffer w/ selected line
+			local buf_id = buffers[buffer_index].buf_id
+			if is_valid_buffer(buf_id) then
+				vim.api.nvim_set_current_buf(buf_id)
+			else
+				vim.notify("Buffer is no longer valid", vim.log.levels.ERROR)
+			end
 		end
 	end, {
 		buffer = window.buf,
