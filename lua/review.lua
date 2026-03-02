@@ -76,6 +76,12 @@ local function mark_file_as_reviewed()
 	vim.notify("Buffer is not in the review list", vim.log.levels.WARN)
 end
 
+local function clear_all_buffers()
+	local count = #buffers
+	buffers = {}
+	vim.notify(string.format("Cleared %d buffer(s) from review list", count), vim.log.levels.INFO)
+end
+
 local function create_window(config)
 	local buf = vim.api.nvim_create_buf(false, true)
 	local win = vim.api.nvim_open_win(buf, true, config.opts)
@@ -151,6 +157,27 @@ function M.setup(user_config)
 	-- Merge user config with default config
 	M.config = vim.tbl_deep_extend("force", M.config, user_config or {})
 
+	-- Create user commands
+	vim.api.nvim_create_user_command("ReviewAdd", mark_buffer, {
+		desc = "Add current buffer to review list",
+	})
+
+	vim.api.nvim_create_user_command("ReviewRemove", unmark_buffer, {
+		desc = "Remove current buffer from review list",
+	})
+
+	vim.api.nvim_create_user_command("ReviewList", show_buffers, {
+		desc = "Show all buffers in review list",
+	})
+
+	vim.api.nvim_create_user_command("ReviewToggle", mark_file_as_reviewed, {
+		desc = "Toggle reviewed status of current buffer",
+	})
+
+	vim.api.nvim_create_user_command("ReviewClear", clear_all_buffers, {
+		desc = "Clear all buffers from review list",
+	})
+
 	-- Setup keymaps if enabled
 	if M.config.keymaps.enable then
 		vim.keymap.set("n", M.config.keymaps.insert, mark_buffer, { desc = "Review: Insert buffer" })
@@ -165,5 +192,6 @@ M.mark_buffer = mark_buffer
 M.unmark_buffer = unmark_buffer
 M.show_buffers = show_buffers
 M.mark_file_as_reviewed = mark_file_as_reviewed
+M.clear_all_buffers = clear_all_buffers
 
 return M
