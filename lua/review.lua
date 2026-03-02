@@ -232,54 +232,11 @@ end
 
 -- Setup function
 function M.setup(user_config)
+	-- Mark that the plugin has been configured
+	vim.g.review_configured = true
+	
 	-- Merge user config with default config
 	M.config = vim.tbl_deep_extend("force", M.config, user_config or {})
-
-	-- Create user commands with error handling
-	vim.api.nvim_create_user_command("ReviewAdd", function()
-		local ok, err = pcall(mark_buffer)
-		if not ok then
-			vim.notify("ReviewAdd failed: " .. tostring(err), vim.log.levels.ERROR)
-		end
-	end, {
-		desc = "Add current buffer to review list",
-	})
-
-	vim.api.nvim_create_user_command("ReviewRemove", function()
-		local ok, err = pcall(unmark_buffer)
-		if not ok then
-			vim.notify("ReviewRemove failed: " .. tostring(err), vim.log.levels.ERROR)
-		end
-	end, {
-		desc = "Remove current buffer from review list",
-	})
-
-	vim.api.nvim_create_user_command("ReviewList", function()
-		local ok, err = pcall(show_buffers)
-		if not ok then
-			vim.notify("ReviewList failed: " .. tostring(err), vim.log.levels.ERROR)
-		end
-	end, {
-		desc = "Show all buffers in review list",
-	})
-
-	vim.api.nvim_create_user_command("ReviewToggle", function()
-		local ok, err = pcall(mark_file_as_reviewed)
-		if not ok then
-			vim.notify("ReviewToggle failed: " .. tostring(err), vim.log.levels.ERROR)
-		end
-	end, {
-		desc = "Toggle reviewed status of current buffer",
-	})
-
-	vim.api.nvim_create_user_command("ReviewClear", function()
-		local ok, err = pcall(clear_all_buffers)
-		if not ok then
-			vim.notify("ReviewClear failed: " .. tostring(err), vim.log.levels.ERROR)
-		end
-	end, {
-		desc = "Clear all buffers from review list",
-	})
 
 	-- Setup keymaps if enabled
 	if M.config.keymaps.enable then
