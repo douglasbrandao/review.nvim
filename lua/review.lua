@@ -9,6 +9,7 @@ M.config = {
 		remove = "<leader>rr",
 		list = "<leader>rl",
 		toggle_reviewed = "<leader>rx",
+		git_diff = "<leader>rg",
 	},
 	window = {
 		width = 100,
@@ -18,6 +19,9 @@ M.config = {
 	icons = {
 		reviewed = "✅",
 		not_reviewed = "❌",
+	},
+	git = {
+		default_base = nil, -- nil means auto-detect (main/master)
 	},
 }
 
@@ -90,6 +94,160 @@ local function clear_all_buffers()
 	local count = #buffers
 	buffers = {}
 	vim.notify(string.format("Cleared %d buffer(s) from review list", count), vim.log.levels.INFO)
+end
+
+-- Git integration functions
+
+-- Get the git root directory
+local function get_git_root()
+	local handle = io.popen("git rev-parse --show-toplevel 2>/dev/null")
+	if not handle then
+		return nil
+	end
+	local result = handle:read("*a")
+	handle:close()
+	
+	if result and result ~= "" then
+		return result:gsub("%s+$", "") -- Trim whitespace
+	end
+	return nil
+end
+
+-- Get the current branch name
+local function get_current_branch()
+	local handle = io.popen("git branch --show-current 2>/dev/null")
+	if not handle then
+		return nil
+	end
+	local result = handle:read("*a")
+	handle:close()
+	
+	if result and result ~= "" then
+		return result:gsub("%s+$", "")
+	end
+	return nil
+end
+
+-- Get the default branch (main or master)
+local function get_default_branch()
+	-- Try to get the default branch from remote
+	local handle = io.popen("git symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's@^refs/remotes/origin/@@'")
+	if handle then
+		local result = handle:read("*a")
+		handle:close()
+		if result and result ~= "" then
+			return result:gsub("%s+$", "")
+		end
+	end
+	
+	-- Fallback: check if main or master exists
+	handle = io.popen("git show-ref --verify --quiet refs/heads/main 2>/dev/null && echo main || echo master")
+	if handle then
+		local result = handle:read("*a")
+		handle:close()
+		if result and result ~= "" then
+			return result:gsub("%s+$", "")
+		end
+	end
+	
+	return "main"
+end
+
+-- Get files modified in current branch compared to base branch
+local function get_git_diff_files(base_branch)
+	local git_root = get_git_root()
+	if not git_root then
+		vim.notify("Not in a git repository", vim.log.levels.ERROR)
+		return {}
+	end
+	
+	-- Use the provided base branch or detect the default
+	base_branch = base_branch or get_default_branch()
+	
+	-- Get the merge base between current branch and base branch
+	local merge_base_cmd = string.format("git merge-base %s HEAD 2>/dev/null", base_branch)
+	local handle = io.popen(merge_base_cmd)
+	if not handle then
+		vim.notify("Failed to get merge base", vim.log.levels.ERROR)
+		return {}
+	end
+	local merge_base = handle:read("*a"):gsub("%s+$", "")
+	handle:close()
+	
+	if merge_base == "" then
+		vim.notify(string.format("Could not find merge base with '%s'", base_branch), vim.log.levels.ERROR)
+		return {}
+	end
+	
+	-- Get the list of changed files
+	local diff_cmd = string.format("git diff --name-only %s HEAD 2>/dev/null", merge_base)
+	handle = io.popen(diff_cmd)
+	if not handle then
+		vim.notify("Failed to get diff", vim.log.levels.ERROR)
+		return {}
+	end
+	
+	local files = {}
+	for line in handle:lines() do
+		if line and line ~= "" then
+			-- Convert to absolute path
+			local abs_path = git_root .. "/" .. line
+			table.insert(files, abs_path)
+		end
+	end
+	handle:close()
+	
+	return files
+end
+
+-- Populate review list from git diff
+local function populate_from_git_diff(base_branch)
+	local files = get_git_diff_files(base_branch)
+	
+	if #files == 0 then
+		vim.notify("No changed files found", vim.log.levels.WARN)
+		return
+	end
+	
+	-- Clear existing buffers
+	buffers = {}
+	
+	local added_count = 0
+	local skipped_count = 0
+	
+	for _, filepath in ipairs(files) do
+		-- Check if file exists
+		local file_exists = vim.fn.filereadable(filepath) == 1
+		if file_exists then
+			-- Open or get buffer for the file
+			local buf_id = vim.fn.bufadd(filepath)
+			vim.fn.bufload(buf_id)
+			
+			-- Add to review list
+			if not utils.has_value(buffers, buf_id) then
+				table.insert(buffers, { buf_id = buf_id, is_marked = false })
+				added_count = added_count + 1
+			end
+		else
+			skipped_count = skipped_count + 1
+		end
+	end
+	
+	local current_branch = get_current_branch() or "current"
+	local base = base_branch or get_default_branch()
+	
+	local message = string.format(
+		"Added %d file(s) to review (%s → %s)",
+		added_count,
+		base,
+		current_branch
+	)
+	
+	if skipped_count > 0 then
+		message = message .. string.format(" | %d file(s) skipped (deleted)", skipped_count)
+	end
+	
+	vim.notify(message, vim.log.levels.INFO)
 end
 
 local function create_window(config)
@@ -267,6 +425,13 @@ function M.setup(user_config)
 				vim.notify("Failed to toggle review status: " .. tostring(err), vim.log.levels.ERROR)
 			end
 		end, { desc = "Review: Toggle reviewed" })
+		
+		vim.keymap.set("n", M.config.keymaps.git_diff, function()
+			local ok, err = pcall(populate_from_git_diff, M.config.git.default_base)
+			if not ok then
+				vim.notify("Failed to load git diff: " .. tostring(err), vim.log.levels.ERROR)
+			end
+		end, { desc = "Review: Load files from git diff" })
 	end
 end
 
@@ -276,5 +441,9 @@ M.unmark_buffer = unmark_buffer
 M.show_buffers = show_buffers
 M.mark_file_as_reviewed = mark_file_as_reviewed
 M.clear_all_buffers = clear_all_buffers
+M.populate_from_git_diff = populate_from_git_diff
+M.get_git_diff_files = get_git_diff_files
+M.get_current_branch = get_current_branch
+M.get_default_branch = get_default_branch
 
 return M

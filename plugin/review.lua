@@ -38,6 +38,27 @@ end, {
 	desc = "Clear all buffers from review list",
 })
 
+vim.api.nvim_create_user_command("ReviewGitDiff", function(opts)
+	local base_branch = opts.args ~= "" and opts.args or nil
+	require("review").populate_from_git_diff(base_branch)
+end, {
+	desc = "Populate review list from git diff (optional: specify base branch)",
+	nargs = "?",
+	complete = function()
+		-- Provide branch name completion
+		local handle = io.popen("git branch --format='%(refname:short)' 2>/dev/null")
+		if not handle then
+			return {}
+		end
+		local branches = {}
+		for line in handle:lines() do
+			table.insert(branches, line)
+		end
+		handle:close()
+		return branches
+	end,
+})
+
 -- Auto-setup with default config if user doesn't call setup() manually
 vim.api.nvim_create_autocmd("VimEnter", {
 	once = true,
