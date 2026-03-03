@@ -24,10 +24,14 @@ M.config = {
 	},
 	git = {
 		default_base = nil, -- nil means auto-detect (main/master)
+		show_diff_stats = true, -- Show +/- line stats in the list
 	},
 }
 
 local buffers = {}
+
+-- Store the current merge base for diff stats
+local current_merge_base = nil
 
 -- Helper function to check if buffer is valid
 local function is_valid_buffer(buf_id)
@@ -58,7 +62,13 @@ end
 local function mark_buffer()
 	local current_buffer = vim.api.nvim_get_current_buf()
 	if not utils.has_value(buffers, current_buffer) then
-		local buffer = { buf_id = current_buffer, is_marked = false }
+		local filepath = vim.api.nvim_buf_get_name(current_buffer)
+		local buffer = { 
+			buf_id = current_buffer, 
+			is_marked = false,
+			filepath = filepath,
+			diff_stats = nil, -- Will be nil for manually added buffers
+		}
 		table.insert(buffers, buffer)
 		vim.notify("Buffer added to review list", vim.log.levels.INFO)
 	else
@@ -224,6 +234,79 @@ local function get_git_root()
 	return nil
 end
 
+-- Get diff stats (additions/deletions) for a specific file
+local function get_file_diff_stats(filepath, merge_base)
+	if not merge_base then
+		return nil
+	end
+	
+	local git_root = get_git_root()
+	if not git_root then
+		return nil
+	end
+	
+	-- Get relative path from git root
+	local rel_path = filepath:gsub("^" .. vim.pesc(git_root) .. "/", "")
+	
+	-- Get numstat for the specific file
+	local cmd = string.format("git diff --numstat %s HEAD -- '%s' 2>/dev/null", merge_base, rel_path)
+	local handle = io.popen(cmd)
+	if not handle then
+		return nil
+	end
+	
+	local result = handle:read("*a")
+	handle:close()
+	
+	if not result or result == "" then
+		return nil
+	end
+	
+	-- Parse numstat output: "additions\tdeletions\tfilename"
+	local additions, deletions = result:match("^(%d+)%s+(%d+)")
+	if additions and deletions then
+		return {
+			additions = tonumber(additions) or 0,
+			deletions = tonumber(deletions) or 0,
+		}
+	end
+	
+	return nil
+end
+
+-- Get diff stats for all files in a batch (more efficient)
+local function get_all_diff_stats(merge_base)
+	if not merge_base then
+		return {}
+	end
+	
+	local git_root = get_git_root()
+	if not git_root then
+		return {}
+	end
+	
+	local cmd = string.format("git diff --numstat %s HEAD 2>/dev/null", merge_base)
+	local handle = io.popen(cmd)
+	if not handle then
+		return {}
+	end
+	
+	local stats = {}
+	for line in handle:lines() do
+		local additions, deletions, filename = line:match("^(%d+)%s+(%d+)%s+(.+)$")
+		if additions and deletions and filename then
+			local abs_path = git_root .. "/" .. filename
+			stats[abs_path] = {
+				additions = tonumber(additions) or 0,
+				deletions = tonumber(deletions) or 0,
+			}
+		end
+	end
+	handle:close()
+	
+	return stats
+end
+
 -- Get the current branch name
 local function get_current_branch()
 	local handle = io.popen("git branch --show-current 2>/dev/null")
@@ -269,7 +352,7 @@ local function get_git_diff_files(base_branch)
 	local git_root = get_git_root()
 	if not git_root then
 		vim.notify("Not in a git repository", vim.log.levels.ERROR)
-		return {}
+		return {}, nil
 	end
 	
 	-- Use the provided base branch or detect the default
@@ -280,22 +363,25 @@ local function get_git_diff_files(base_branch)
 	local handle = io.popen(merge_base_cmd)
 	if not handle then
 		vim.notify("Failed to get merge base", vim.log.levels.ERROR)
-		return {}
+		return {}, nil
 	end
 	local merge_base = handle:read("*a"):gsub("%s+$", "")
 	handle:close()
 	
 	if merge_base == "" then
 		vim.notify(string.format("Could not find merge base with '%s'", base_branch), vim.log.levels.ERROR)
-		return {}
+		return {}, nil
 	end
+	
+	-- Store the merge base for later use
+	current_merge_base = merge_base
 	
 	-- Get the list of changed files
 	local diff_cmd = string.format("git diff --name-only %s HEAD 2>/dev/null", merge_base)
 	handle = io.popen(diff_cmd)
 	if not handle then
 		vim.notify("Failed to get diff", vim.log.levels.ERROR)
-		return {}
+		return {}, merge_base
 	end
 	
 	local files = {}
@@ -323,6 +409,12 @@ local function populate_from_git_diff(base_branch)
 	-- Clear existing buffers
 	buffers = {}
 	
+	-- Get diff stats for all files in one batch (more efficient)
+	local all_stats = {}
+	if M.config.git.show_diff_stats and current_merge_base then
+		all_stats = get_all_diff_stats(current_merge_base)
+	end
+	
 	local added_count = 0
 	local skipped_count = 0
 	
@@ -334,9 +426,17 @@ local function populate_from_git_diff(base_branch)
 			local buf_id = vim.fn.bufadd(filepath)
 			vim.fn.bufload(buf_id)
 			
-			-- Add to review list
+			-- Get diff stats for this file
+			local stats = all_stats[filepath]
+			
+			-- Add to review list with stats
 			if not utils.has_value(buffers, buf_id) then
-				table.insert(buffers, { buf_id = buf_id, is_marked = false })
+				table.insert(buffers, { 
+					buf_id = buf_id, 
+					is_marked = false,
+					filepath = filepath,
+					diff_stats = stats,
+				})
 				added_count = added_count + 1
 			end
 		else
@@ -391,12 +491,26 @@ local function show_buffers()
 	-- Calculate statistics
 	local total = #buffers
 	local reviewed = 0
+	local total_additions = 0
+	local total_deletions = 0
+	
 	for _, buffer in ipairs(buffers) do
 		if buffer.is_marked then
 			reviewed = reviewed + 1
 		end
+		-- Sum up diff stats
+		if buffer.diff_stats then
+			total_additions = total_additions + buffer.diff_stats.additions
+			total_deletions = total_deletions + buffer.diff_stats.deletions
+		end
 	end
 	local percentage = math.floor((reviewed / total) * 100)
+	
+	-- Build title with optional diff stats
+	local title = string.format(" Review List - %d/%d (%d%%) ", reviewed, total, percentage)
+	if M.config.git.show_diff_stats and (total_additions > 0 or total_deletions > 0) then
+		title = string.format(" Review List - %d/%d (%d%%) | +%d -%d ", reviewed, total, percentage, total_additions, total_deletions)
+	end
 
 	--- Window config
 	local window_config = {
@@ -408,7 +522,7 @@ local function show_buffers()
 			col = math.floor((vim.o.columns - M.config.window.width) / 2),
 			style = "minimal",
 			border = M.config.window.border,
-			title = string.format(" Review List - %d/%d (%d%%) ", reviewed, total, percentage),
+			title = title,
 			title_pos = "center",
 		},
 	}
@@ -433,7 +547,19 @@ local function show_buffers()
 			filename = "[Invalid Buffer]"
 		end
 		local marked_icon = buffer.is_marked and M.config.icons.reviewed or M.config.icons.not_reviewed
-		table.insert(lines, string.format("%d: %s - %s", i, marked_icon, filename:match("^.+/(.+)$") or filename))
+		local short_name = filename:match("^.+/(.+)$") or filename
+		
+		-- Build the line with optional diff stats
+		local line = string.format("%d: %s - %s", i, marked_icon, short_name)
+		
+		-- Add diff stats if available
+		if M.config.git.show_diff_stats and buffer.diff_stats then
+			local stats = buffer.diff_stats
+			local stats_str = string.format(" [+%d -%d]", stats.additions, stats.deletions)
+			line = line .. stats_str
+		end
+		
+		table.insert(lines, line)
 	end
 	
 	-- Add separator line
