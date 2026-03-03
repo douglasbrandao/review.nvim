@@ -71,6 +71,25 @@ end, {
 	desc = "Go to previous unreviewed file",
 })
 
+vim.api.nvim_create_user_command("ReviewSave", function()
+	require("review").save_state()
+	vim.notify("Review state saved", vim.log.levels.INFO)
+end, {
+	desc = "Save review state to file",
+})
+
+vim.api.nvim_create_user_command("ReviewLoad", function()
+	require("review").load_state()
+end, {
+	desc = "Load review state from file",
+})
+
+vim.api.nvim_create_user_command("ReviewClearState", function()
+	require("review").clear_state()
+end, {
+	desc = "Clear saved review state file",
+})
+
 -- Auto-setup with default config if user doesn't call setup() manually
 vim.api.nvim_create_autocmd("VimEnter", {
 	once = true,

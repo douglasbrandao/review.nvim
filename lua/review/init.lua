@@ -26,6 +26,12 @@ M.config = {
 		default_base = nil, -- nil means auto-detect (main/master)
 		show_diff_stats = true, -- Show +/- line stats in the list
 	},
+	persistence = {
+		enable = true, -- Enable automatic state persistence
+		filename = ".review-state.json", -- State file name (relative to git root)
+		auto_save = true, -- Auto-save on buffer mark/unmark
+		auto_load = true, -- Auto-load state when git diff is populated
+	},
 }
 
 local buffers = {}
@@ -71,6 +77,7 @@ local function mark_buffer()
 		}
 		table.insert(buffers, buffer)
 		vim.notify("Buffer added to review list", vim.log.levels.INFO)
+		auto_save_state()
 	else
 		vim.notify("Buffer is already in the list", vim.log.levels.WARN)
 	end
@@ -82,6 +89,7 @@ local function unmark_buffer()
 		if v.buf_id == current_buffer then
 			table.remove(buffers, i)
 			vim.notify("Buffer removed from review list", vim.log.levels.INFO)
+			auto_save_state()
 			return
 		end
 	end
@@ -96,6 +104,7 @@ local function mark_file_as_reviewed()
 			v.is_marked = not v.is_marked
 			local status = v.is_marked and "reviewed" or "not reviewed"
 			vim.notify("File marked as " .. status, vim.log.levels.INFO)
+			auto_save_state()
 			return
 		end
 	end
@@ -106,6 +115,164 @@ local function clear_all_buffers()
 	local count = #buffers
 	buffers = {}
 	vim.notify(string.format("Cleared %d buffer(s) from review list", count), vim.log.levels.INFO)
+	auto_save_state()
+end
+
+-- Persistence functions
+
+-- Get the state file path (relative to git root)
+local function get_state_file_path()
+	local git_root = nil
+	local handle = io.popen("git rev-parse --show-toplevel 2>/dev/null")
+	if handle then
+		local result = handle:read("*a")
+		handle:close()
+		if result and result ~= "" then
+			git_root = result:gsub("%s+$", "")
+		end
+	end
+	
+	if not git_root then
+		-- Fallback to current working directory
+		git_root = vim.fn.getcwd()
+	end
+	
+	return git_root .. "/" .. M.config.persistence.filename
+end
+
+-- Save the current review state to a JSON file
+local function save_state()
+	if not M.config.persistence.enable then
+		return false
+	end
+	
+	local state_file = get_state_file_path()
+	
+	-- Build state data (only serializable data, not buf_id)
+	local state = {
+		version = 1,
+		merge_base = current_merge_base,
+		files = {},
+	}
+	
+	for _, buffer in ipairs(buffers) do
+		table.insert(state.files, {
+			filepath = buffer.filepath,
+			is_marked = buffer.is_marked,
+			diff_stats = buffer.diff_stats,
+		})
+	end
+	
+	-- Serialize to JSON
+	local ok, json = pcall(vim.fn.json_encode, state)
+	if not ok then
+		vim.notify("Failed to serialize review state: " .. tostring(json), vim.log.levels.ERROR)
+		return false
+	end
+	
+	-- Write to file
+	local file, err = io.open(state_file, "w")
+	if not file then
+		vim.notify("Failed to save review state: " .. tostring(err), vim.log.levels.ERROR)
+		return false
+	end
+	
+	file:write(json)
+	file:close()
+	
+	return true
+end
+
+-- Load the review state from a JSON file
+local function load_state()
+	if not M.config.persistence.enable then
+		return false
+	end
+	
+	local state_file = get_state_file_path()
+	
+	-- Check if file exists
+	local file = io.open(state_file, "r")
+	if not file then
+		return nil -- No state file exists
+	end
+	
+	local content = file:read("*a")
+	file:close()
+	
+	if not content or content == "" then
+		return nil
+	end
+	
+	-- Parse JSON
+	local ok, state = pcall(vim.fn.json_decode, content)
+	if not ok or not state then
+		vim.notify("Failed to parse review state file", vim.log.levels.WARN)
+		return nil
+	end
+	
+	return state
+end
+
+-- Restore buffers from saved state
+local function restore_state()
+	local state = load_state()
+	if not state or not state.files then
+		vim.notify("No saved review state found", vim.log.levels.INFO)
+		return false
+	end
+	
+	-- Clear current buffers
+	buffers = {}
+	current_merge_base = state.merge_base
+	
+	local loaded_count = 0
+	local skipped_count = 0
+	
+	for _, file_state in ipairs(state.files) do
+		local filepath = file_state.filepath
+		
+		-- Check if file exists
+		if vim.fn.filereadable(filepath) == 1 then
+			-- Find or create buffer for this file
+			local buf_id = vim.fn.bufnr(filepath, true) -- true = create if not exists
+			
+			-- Set buffer as listed (so it appears in buffer list)
+			vim.bo[buf_id].buflisted = true
+			
+			table.insert(buffers, {
+				buf_id = buf_id,
+				is_marked = file_state.is_marked or false,
+				filepath = filepath,
+				diff_stats = file_state.diff_stats,
+			})
+			loaded_count = loaded_count + 1
+		else
+			skipped_count = skipped_count + 1
+		end
+	end
+	
+	local msg = string.format("Restored %d file(s) from review state", loaded_count)
+	if skipped_count > 0 then
+		msg = msg .. string.format(" (%d skipped - no longer exist)", skipped_count)
+	end
+	vim.notify(msg, vim.log.levels.INFO)
+	
+	return true
+end
+
+-- Delete the state file
+local function clear_state()
+	local state_file = get_state_file_path()
+	os.remove(state_file)
+	vim.notify("Review state cleared", vim.log.levels.INFO)
+end
+
+-- Auto-save wrapper (called after state changes)
+local function auto_save_state()
+	if M.config.persistence.enable and M.config.persistence.auto_save then
+		save_state()
+	end
 end
 
 -- Navigation functions
@@ -397,8 +564,8 @@ local function get_git_diff_files(base_branch)
 	return files
 end
 
--- Populate review list from git diff
-local function populate_from_git_diff(base_branch)
+-- Internal function to populate review list from git diff
+local function populate_from_git_diff_internal(base_branch)
 	local files = get_git_diff_files(base_branch)
 	
 	if #files == 0 then
@@ -459,6 +626,35 @@ local function populate_from_git_diff(base_branch)
 	end
 	
 	vim.notify(message, vim.log.levels.INFO)
+	
+	-- Auto-save the new state
+	auto_save_state()
+end
+
+-- Populate review list from git diff
+local function populate_from_git_diff(base_branch)
+	-- Check if we should auto-load existing state
+	if M.config.persistence.enable and M.config.persistence.auto_load then
+		local existing_state = load_state()
+		if existing_state and existing_state.files and #existing_state.files > 0 then
+			-- Ask user if they want to restore or start fresh
+			vim.ui.select(
+				{ "Restore previous review", "Start fresh" },
+				{ prompt = "Found saved review state:" },
+				function(choice)
+					if choice == "Restore previous review" then
+						restore_state()
+					else
+						-- Continue with fresh git diff
+						populate_from_git_diff_internal(base_branch)
+					end
+				end
+			)
+			return
+		end
+	end
+	
+	populate_from_git_diff_internal(base_branch)
 end
 
 local function create_window(config)
@@ -698,5 +894,8 @@ M.get_current_branch = get_current_branch
 M.get_default_branch = get_default_branch
 M.goto_next_unreviewed = goto_next_unreviewed
 M.goto_prev_unreviewed = goto_prev_unreviewed
+M.save_state = save_state
+M.load_state = restore_state
+M.clear_state = clear_state
 
 return M
