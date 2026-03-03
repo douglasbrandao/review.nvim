@@ -10,6 +10,8 @@ M.config = {
 		list = "<leader>rl",
 		toggle_reviewed = "<leader>rx",
 		git_diff = "<leader>rg",
+		next_unreviewed = "<leader>rn",
+		prev_unreviewed = "<leader>rp",
 	},
 	window = {
 		width = 100,
@@ -94,6 +96,115 @@ local function clear_all_buffers()
 	local count = #buffers
 	buffers = {}
 	vim.notify(string.format("Cleared %d buffer(s) from review list", count), vim.log.levels.INFO)
+end
+
+-- Navigation functions
+
+-- Get the index of the current buffer in the review list
+local function get_current_buffer_index()
+	local current_buffer = vim.api.nvim_get_current_buf()
+	for i, v in ipairs(buffers) do
+		if v.buf_id == current_buffer then
+			return i
+		end
+	end
+	return nil
+end
+
+-- Go to the next unreviewed file
+local function goto_next_unreviewed()
+	cleanup_invalid_buffers()
+	
+	if #buffers == 0 then
+		vim.notify("No buffers in review list", vim.log.levels.WARN)
+		return
+	end
+	
+	local current_index = get_current_buffer_index() or 0
+	local start_index = current_index
+	local checked = 0
+	
+	-- Search forward from current position
+	while checked < #buffers do
+		current_index = current_index + 1
+		if current_index > #buffers then
+			current_index = 1 -- Wrap around
+		end
+		
+		local buffer = buffers[current_index]
+		if not buffer.is_marked and is_valid_buffer(buffer.buf_id) then
+			local ok, err = pcall(vim.api.nvim_set_current_buf, buffer.buf_id)
+			if ok then
+				local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buffer.buf_id), ":t")
+				local remaining = 0
+				for _, b in ipairs(buffers) do
+					if not b.is_marked then
+						remaining = remaining + 1
+					end
+				end
+				vim.notify(string.format("[%d/%d] %s (%d remaining)", current_index, #buffers, filename, remaining), vim.log.levels.INFO)
+				return
+			else
+				vim.notify("Failed to switch buffer: " .. tostring(err), vim.log.levels.ERROR)
+				return
+			end
+		end
+		
+		checked = checked + 1
+		if current_index == start_index then
+			break
+		end
+	end
+	
+	vim.notify("✅ All files have been reviewed!", vim.log.levels.INFO)
+end
+
+-- Go to the previous unreviewed file
+local function goto_prev_unreviewed()
+	cleanup_invalid_buffers()
+	
+	if #buffers == 0 then
+		vim.notify("No buffers in review list", vim.log.levels.WARN)
+		return
+	end
+	
+	local current_index = get_current_buffer_index() or (#buffers + 1)
+	local start_index = current_index
+	local checked = 0
+	
+	-- Search backward from current position
+	while checked < #buffers do
+		current_index = current_index - 1
+		if current_index < 1 then
+			current_index = #buffers -- Wrap around
+		end
+		
+		local buffer = buffers[current_index]
+		if not buffer.is_marked and is_valid_buffer(buffer.buf_id) then
+			local ok, err = pcall(vim.api.nvim_set_current_buf, buffer.buf_id)
+			if ok then
+				local filename = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buffer.buf_id), ":t")
+				local remaining = 0
+				for _, b in ipairs(buffers) do
+					if not b.is_marked then
+						remaining = remaining + 1
+					end
+				end
+				vim.notify(string.format("[%d/%d] %s (%d remaining)", current_index, #buffers, filename, remaining), vim.log.levels.INFO)
+				return
+			else
+				vim.notify("Failed to switch buffer: " .. tostring(err), vim.log.levels.ERROR)
+				return
+			end
+		end
+		
+		checked = checked + 1
+		if current_index == start_index then
+			break
+		end
+	end
+	
+	vim.notify("✅ All files have been reviewed!", vim.log.levels.INFO)
 end
 
 -- Git integration functions
@@ -432,6 +543,20 @@ function M.setup(user_config)
 				vim.notify("Failed to load git diff: " .. tostring(err), vim.log.levels.ERROR)
 			end
 		end, { desc = "Review: Load files from git diff" })
+		
+		vim.keymap.set("n", M.config.keymaps.next_unreviewed, function()
+			local ok, err = pcall(goto_next_unreviewed)
+			if not ok then
+				vim.notify("Failed to go to next file: " .. tostring(err), vim.log.levels.ERROR)
+			end
+		end, { desc = "Review: Go to next unreviewed file" })
+		
+		vim.keymap.set("n", M.config.keymaps.prev_unreviewed, function()
+			local ok, err = pcall(goto_prev_unreviewed)
+			if not ok then
+				vim.notify("Failed to go to previous file: " .. tostring(err), vim.log.levels.ERROR)
+			end
+		end, { desc = "Review: Go to previous unreviewed file" })
 	end
 end
 
@@ -445,5 +570,7 @@ M.populate_from_git_diff = populate_from_git_diff
 M.get_git_diff_files = get_git_diff_files
 M.get_current_branch = get_current_branch
 M.get_default_branch = get_default_branch
+M.goto_next_unreviewed = goto_next_unreviewed
+M.goto_prev_unreviewed = goto_prev_unreviewed
 
 return M

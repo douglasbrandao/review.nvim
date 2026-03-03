@@ -59,6 +59,18 @@ end, {
 	end,
 })
 
+vim.api.nvim_create_user_command("ReviewNext", function()
+	require("review").goto_next_unreviewed()
+end, {
+	desc = "Go to next unreviewed file",
+})
+
+vim.api.nvim_create_user_command("ReviewPrev", function()
+	require("review").goto_prev_unreviewed()
+end, {
+	desc = "Go to previous unreviewed file",
+})
+
 -- Auto-setup with default config if user doesn't call setup() manually
 vim.api.nvim_create_autocmd("VimEnter", {
 	once = true,

@@ -1,3 +1,6 @@
+-- lua/review/utils.lua
+-- Utility functions for review.nvim
+
 local M = {}
 
 function M.has_value(tbl, value)
