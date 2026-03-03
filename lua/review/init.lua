@@ -39,6 +39,9 @@ local buffers = {}
 -- Store the current merge base for diff stats
 local current_merge_base = nil
 
+-- Forward declarations for functions used before definition
+local auto_save_state
+
 -- Helper function to check if buffer is valid
 local function is_valid_buffer(buf_id)
 	local ok, is_valid = pcall(vim.api.nvim_buf_is_valid, buf_id)
@@ -269,7 +272,7 @@ local function clear_state()
 end
 
 -- Auto-save wrapper (called after state changes)
-local function auto_save_state()
+auto_save_state = function()
 	if M.config.persistence.enable and M.config.persistence.auto_save then
 		save_state()
 	end
