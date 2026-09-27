@@ -1,382 +1,456 @@
--- review/state.lua
--- State management for review.nvim (buffers, persistence)
-
 local config = require("review.config")
 local git = require("review.git")
 local utils = require("review.utils")
 
-local M = {}
+local M = {
+	buffers = {}, -- Kept as the public name for backward compatibility.
+	context = {},
+}
 
--- Internal state
-M.buffers = {}
-
---- Check if buffer is valid
----@param buf_id number Buffer ID
+---@param buf_id number|nil
 ---@return boolean
 function M.is_valid_buffer(buf_id)
-	local ok, is_valid = pcall(vim.api.nvim_buf_is_valid, buf_id)
-	if not ok then
-		return false
-	end
-
-	local ok2, is_loaded = pcall(vim.api.nvim_buf_is_loaded, buf_id)
-	if not ok2 then
-		return false
-	end
-
-	return is_valid and is_loaded
+	return type(buf_id) == "number" and vim.api.nvim_buf_is_valid(buf_id)
 end
 
---- Clean up invalid buffers from the list
+---Forget dead buffer handles without dropping files from the review.
 function M.cleanup_invalid_buffers()
-	local valid_buffers = {}
-	for _, buffer in ipairs(M.buffers) do
-		if M.is_valid_buffer(buffer.buf_id) then
-			table.insert(valid_buffers, buffer)
+	for _, entry in ipairs(M.buffers) do
+		if entry.buf_id and not M.is_valid_buffer(entry.buf_id) then
+			entry.buf_id = nil
 		end
 	end
-	M.buffers = valid_buffers
 end
 
---- Get the state file path (relative to git root)
+---@param root string
 ---@return string
-local function get_state_file_path()
-	local git_root = git.get_root()
-
-	if not git_root then
-		-- Fallback to current working directory
-		git_root = vim.fn.getcwd()
+local function get_state_file_path(root)
+	local filename = config.options.persistence.filename
+	if filename and filename ~= "" then
+		if utils.is_absolute(filename) then
+			return vim.fs.normalize(filename)
+		end
+		return vim.fs.normalize(root .. "/" .. filename)
 	end
-
-	return git_root .. "/" .. config.options.persistence.filename
+	local directory = vim.fn.stdpath("state") .. "/review.nvim"
+	return directory .. "/" .. vim.fn.sha256(utils.normalize(root)) .. ".json"
 end
 
---- Save the current review state to a JSON file
----@return boolean Success
+---@param root string|nil
+---@return string|nil
+local function resolve_root(root)
+	return root or M.context.root or git.get_root()
+end
+
+---@return boolean
 function M.save()
 	if not config.options.persistence.enable then
 		return false
 	end
+	local root = resolve_root()
+	if not root then
+		vim.notify("Cannot save review state outside a git repository", vim.log.levels.ERROR)
+		return false
+	end
 
-	local state_file = get_state_file_path()
-
-	-- Build state data (only serializable data, not buf_id)
-	local state = {
-		version = 1,
-		merge_base = git.current_merge_base,
-		files = {},
-	}
-
-	for _, buffer in ipairs(M.buffers) do
-		table.insert(state.files, {
-			filepath = buffer.filepath,
-			is_marked = buffer.is_marked,
-			diff_stats = buffer.diff_stats,
+	local files = {}
+	for _, entry in ipairs(M.buffers) do
+		table.insert(files, {
+			path = entry.relative_path or utils.relative(entry.filepath, root),
+			old_path = entry.old_path,
+			status = entry.status,
+			reviewed = entry.is_marked == true,
+			diff_stats = entry.diff_stats,
 		})
 	end
-
-	-- Serialize to JSON
-	local ok, json = pcall(vim.fn.json_encode, state)
-	if not ok then
-		vim.notify("Failed to serialize review state: " .. tostring(json), vim.log.levels.ERROR)
+	local payload = {
+		version = 2,
+		root = root,
+		base = M.context.base,
+		merge_base = M.context.merge_base,
+		head = M.context.head,
+		files = files,
+	}
+	local encoded_ok, encoded = pcall(vim.json.encode, payload)
+	if not encoded_ok then
+		vim.notify("Failed to serialize review state: " .. tostring(encoded), vim.log.levels.ERROR)
 		return false
 	end
 
-	-- Write to file
-	local file, err = io.open(state_file, "w")
-	if not file then
-		vim.notify("Failed to save review state: " .. tostring(err), vim.log.levels.ERROR)
+	local state_file = get_state_file_path(root)
+	local directory = vim.fs.dirname(state_file)
+	if vim.fn.mkdir(directory, "p") == 0 and vim.fn.isdirectory(directory) == 0 then
+		vim.notify("Failed to create review state directory: " .. directory, vim.log.levels.ERROR)
 		return false
 	end
-
-	file:write(json)
-	file:close()
-
+	local temporary = state_file .. ".tmp." .. vim.fn.getpid()
+	local write_ok, write_error = pcall(vim.fn.writefile, { encoded }, temporary, "b")
+	if not write_ok then
+		vim.notify("Failed to save review state: " .. tostring(write_error), vim.log.levels.ERROR)
+		return false
+	end
+	local renamed, rename_error = os.rename(temporary, state_file)
+	if not renamed then
+		os.remove(temporary)
+		vim.notify("Failed to finalize review state: " .. tostring(rename_error), vim.log.levels.ERROR)
+		return false
+	end
 	return true
 end
 
---- Load the review state from a JSON file
----@return table|nil Loaded state or nil
-function M.load()
+---@param root string|nil
+---@return table|nil
+function M.load(root)
 	if not config.options.persistence.enable then
 		return nil
 	end
-
-	local state_file = get_state_file_path()
-
-	-- Check if file exists
-	local file = io.open(state_file, "r")
-	if not file then
-		return nil -- No state file exists
-	end
-
-	local content = file:read("*a")
-	file:close()
-
-	if not content or content == "" then
+	root = resolve_root(root)
+	if not root then
 		return nil
 	end
-
-	-- Parse JSON
-	local ok, state = pcall(vim.fn.json_decode, content)
-	if not ok or not state then
+	local state_file = get_state_file_path(root)
+	local read_ok, lines = pcall(vim.fn.readfile, state_file, "b")
+	if not read_ok or #lines == 0 then
+		-- Read version 1's old default location as a migration path.
+		if config.options.persistence.filename == nil then
+			read_ok, lines = pcall(vim.fn.readfile, root .. "/.review-state.json", "b")
+		end
+		if not read_ok or #lines == 0 then
+			return nil
+		end
+	end
+	local ok, decoded = pcall(vim.json.decode, table.concat(lines, "\n"))
+	if not ok or type(decoded) ~= "table" or type(decoded.files) ~= "table" then
 		vim.notify("Failed to parse review state file", vim.log.levels.WARN)
 		return nil
 	end
-
-	return state
+	return decoded
 end
 
---- Restore buffers from saved state
----@return boolean Success
-function M.restore()
-	local state = M.load()
-	if not state or not state.files then
-		vim.notify("No saved review state found", vim.log.levels.INFO)
+---@param saved table
+---@param context table
+---@return boolean
+local function same_revision(saved, context)
+	return saved.merge_base == context.merge_base and saved.head == context.head
+end
+
+---@param files table[]
+---@return table<string, boolean>
+local function reviewed_by_path(files)
+	local reviewed = {}
+	for _, file in ipairs(files or {}) do
+		local path = file.path or file.relative_path or file.filepath
+		if path then
+			reviewed[path] = file.reviewed == true or file.is_marked == true
+		end
+	end
+	return reviewed
+end
+
+---@param opts table|nil
+---@return boolean
+function M.restore(opts)
+	opts = opts or {}
+	local root = resolve_root(opts.root)
+	local saved = M.load(root)
+	if not saved then
+		if not opts.silent then
+			vim.notify("No saved review state found", vim.log.levels.INFO)
+		end
+		return false
+	end
+	if saved.root and utils.normalize(saved.root) ~= utils.normalize(root) then
+		if not opts.silent then
+			vim.notify("Saved review state belongs to a different repository", vim.log.levels.WARN)
+		end
 		return false
 	end
 
-	-- Clear current buffers
-	M.buffers = {}
-	git.current_merge_base = state.merge_base
-
-	local loaded_count = 0
-	local skipped_count = 0
-
-	for _, file_state in ipairs(state.files) do
-		local filepath = file_state.filepath
-
-		-- Check if file exists
-		if vim.fn.filereadable(filepath) == 1 then
-			-- Find or create buffer for this file
-			local buf_id = vim.fn.bufnr(filepath, true) -- true = create if not exists
-
-			-- Set buffer as listed (so it appears in buffer list)
-			vim.bo[buf_id].buflisted = true
-
-			table.insert(M.buffers, {
-				buf_id = buf_id,
-				is_marked = file_state.is_marked or false,
-				filepath = filepath,
-				diff_stats = file_state.diff_stats,
-			})
-			loaded_count = loaded_count + 1
-		else
-			skipped_count = skipped_count + 1
+	local restored = {}
+	local skipped = 0
+	for _, file in ipairs(saved.files) do
+		local relative_path = file.path or file.relative_path
+		if not relative_path and file.filepath then
+			relative_path = utils.relative(file.filepath, root)
+		end
+		if relative_path then
+			local filepath = utils.is_absolute(relative_path) and relative_path or (root .. "/" .. relative_path)
+			filepath = utils.normalize(filepath)
+			if file.status == "D" or vim.fn.filereadable(filepath) == 1 then
+				local existing = vim.fn.bufnr(filepath)
+				table.insert(restored, {
+					buf_id = existing > 0 and existing or nil,
+					filepath = filepath,
+					relative_path = relative_path,
+					old_path = file.old_path,
+					status = file.status or "M",
+					is_marked = file.reviewed == true or file.is_marked == true,
+					diff_stats = file.diff_stats,
+				})
+			else
+				skipped = skipped + 1
+			end
 		end
 	end
+	M.buffers = restored
+	M.context = {
+		root = root,
+		base = saved.base,
+		merge_base = saved.merge_base,
+		head = saved.head,
+	}
+	git.current_root = root
+	git.current_base = saved.base
+	git.current_merge_base = saved.merge_base
+	git.current_head = saved.head
 
-	local msg = string.format("Restored %d file(s) from review state", loaded_count)
-	if skipped_count > 0 then
-		msg = msg .. string.format(" (%d skipped - no longer exist)", skipped_count)
+	if not opts.silent then
+		local message = string.format("Restored %d file(s) from review state", #restored)
+		if skipped > 0 then
+			message = message .. string.format(" (%d missing file(s) skipped)", skipped)
+		end
+		vim.notify(message, vim.log.levels.INFO)
 	end
-	vim.notify(msg, vim.log.levels.INFO)
-
 	return true
 end
 
---- Delete the state file
 function M.clear()
-	local state_file = get_state_file_path()
-	os.remove(state_file)
+	local root = resolve_root()
+	if not root then
+		vim.notify("No repository found", vim.log.levels.WARN)
+		return
+	end
+	local files = { get_state_file_path(root) }
+	if config.options.persistence.filename == nil then
+		table.insert(files, root .. "/.review-state.json")
+	end
+	for _, state_file in ipairs(files) do
+		if vim.fn.filereadable(state_file) == 1 then
+			local removed, error_message = os.remove(state_file)
+			if not removed then
+				vim.notify("Failed to clear review state: " .. tostring(error_message), vim.log.levels.ERROR)
+				return
+			end
+		end
+	end
 	vim.notify("Review state cleared", vim.log.levels.INFO)
 end
 
---- Auto-save wrapper (called after state changes)
 function M.auto_save()
 	if config.options.persistence.enable and config.options.persistence.auto_save then
 		M.save()
 	end
 end
 
---- Add current buffer to review list
+---@param entry table
+---@return number|nil, string|nil
+function M.ensure_buffer(entry)
+	if M.is_valid_buffer(entry.buf_id) then
+		return entry.buf_id, nil
+	end
+	if entry.status == "D" then
+		local relative_path = entry.old_path or entry.relative_path
+		local content
+		if entry.diff_stats and entry.diff_stats.binary then
+			content = string.format("Binary file deleted: %s", relative_path)
+		else
+			local error_message
+			content, error_message = git.show_file(M.context.root, M.context.merge_base, relative_path)
+			if not content then
+				return nil, error_message or "Could not load deleted file"
+			end
+		end
+		local buffer = vim.api.nvim_create_buf(true, true)
+		local name = string.format("review://%s/%s", (M.context.merge_base or "base"):sub(1, 8), relative_path)
+		pcall(vim.api.nvim_buf_set_name, buffer, name)
+		local lines = vim.split(content, "\n", { plain = true })
+		if lines[#lines] == "" then
+			table.remove(lines)
+		end
+		vim.api.nvim_buf_set_lines(buffer, 0, -1, false, lines)
+		vim.bo[buffer].buftype = "nofile"
+		vim.bo[buffer].bufhidden = "wipe"
+		vim.bo[buffer].swapfile = false
+		vim.bo[buffer].modifiable = false
+		vim.bo[buffer].readonly = true
+		local filetype = vim.filetype.match({ filename = relative_path })
+		if filetype then
+			vim.bo[buffer].filetype = filetype
+		end
+		entry.buf_id = buffer
+		return buffer, nil
+	end
+	if vim.fn.filereadable(entry.filepath) ~= 1 then
+		return nil, "File no longer exists: " .. entry.relative_path
+	end
+	local buffer = vim.fn.bufadd(entry.filepath)
+	vim.bo[buffer].buflisted = true
+	entry.buf_id = buffer
+	return buffer, nil
+end
+
+---@param index number
+---@return boolean
+function M.open(index)
+	local entry = M.buffers[index]
+	if not entry then
+		return false
+	end
+	local buffer, error_message = M.ensure_buffer(entry)
+	if not buffer then
+		vim.notify(error_message, vim.log.levels.ERROR)
+		return false
+	end
+	local ok, set_error = pcall(vim.api.nvim_set_current_buf, buffer)
+	if not ok then
+		vim.notify("Failed to open review file: " .. tostring(set_error), vim.log.levels.ERROR)
+		return false
+	end
+	return true
+end
+
 function M.add_buffer()
 	local current_buffer = vim.api.nvim_get_current_buf()
-	if not utils.has_value(M.buffers, current_buffer) then
-		local filepath = vim.api.nvim_buf_get_name(current_buffer)
-		local buffer = {
-			buf_id = current_buffer,
-			is_marked = false,
-			filepath = filepath,
-			diff_stats = nil, -- Will be nil for manually added buffers
-		}
-		table.insert(M.buffers, buffer)
-		vim.notify("Buffer added to review list", vim.log.levels.INFO)
-		M.auto_save()
-	else
-		vim.notify("Buffer is already in the list", vim.log.levels.WARN)
+	local filepath = vim.api.nvim_buf_get_name(current_buffer)
+	if filepath == "" or vim.bo[current_buffer].buftype ~= "" then
+		vim.notify("Only file buffers can be added to a review", vim.log.levels.WARN)
+		return
 	end
+	filepath = utils.normalize(filepath)
+	for _, entry in ipairs(M.buffers) do
+		if entry.filepath == filepath then
+			vim.notify("File is already in the review list", vim.log.levels.WARN)
+			return
+		end
+	end
+	local root = git.get_root(filepath) or vim.fn.getcwd()
+	if not M.context.root then
+		M.context.root = root
+	end
+	table.insert(M.buffers, {
+		buf_id = current_buffer,
+		is_marked = false,
+		filepath = filepath,
+		relative_path = utils.relative(filepath, M.context.root),
+		status = "M",
+	})
+	vim.notify("File added to review list", vim.log.levels.INFO)
+	M.auto_save()
 end
 
---- Remove current buffer from review list
 function M.remove_buffer()
-	local current_buffer = vim.api.nvim_get_current_buf()
-	for i, v in pairs(M.buffers) do
-		if v.buf_id == current_buffer then
-			table.remove(M.buffers, i)
-			vim.notify("Buffer removed from review list", vim.log.levels.INFO)
-			M.auto_save()
-			return
-		end
+	local index = M.get_current_buffer_index()
+	if not index then
+		vim.notify("File is not in the review list", vim.log.levels.WARN)
+		return
 	end
-	vim.notify("Buffer is not in the list", vim.log.levels.WARN)
+	table.remove(M.buffers, index)
+	vim.notify("File removed from review list", vim.log.levels.INFO)
+	M.auto_save()
 end
 
---- Toggle reviewed status for current buffer
+---@param index number
+---@param opts table|nil
+---@return boolean
+function M.toggle_index(index, opts)
+	local entry = M.buffers[index]
+	if not entry then
+		return false
+	end
+	entry.is_marked = not entry.is_marked
+	M.auto_save()
+	if not (opts and opts.silent) then
+		vim.notify("File marked as " .. (entry.is_marked and "reviewed" or "not reviewed"), vim.log.levels.INFO)
+	end
+	return true
+end
+
 function M.toggle_reviewed()
-	M.cleanup_invalid_buffers()
-	local current_buffer = vim.api.nvim_get_current_buf()
-	for _, v in pairs(M.buffers) do
-		if v.buf_id == current_buffer then
-			v.is_marked = not v.is_marked
-			local status = v.is_marked and "reviewed" or "not reviewed"
-			vim.notify("File marked as " .. status, vim.log.levels.INFO)
-			M.auto_save()
-			return
-		end
+	local index = M.get_current_buffer_index()
+	if not index then
+		vim.notify("File is not in the review list", vim.log.levels.WARN)
+		return
 	end
-	vim.notify("Buffer is not in the review list", vim.log.levels.WARN)
+	M.toggle_index(index)
 end
 
---- Clear all buffers from review list
 function M.clear_all()
 	local count = #M.buffers
 	M.buffers = {}
-	vim.notify(string.format("Cleared %d buffer(s) from review list", count), vim.log.levels.INFO)
+	vim.notify(string.format("Cleared %d file(s) from review list", count), vim.log.levels.INFO)
 	M.auto_save()
 end
 
---- Populate review list from git diff (internal)
----@param base_branch string|nil Base branch to compare against
-function M.populate_from_git_diff_internal(base_branch)
-	local files = git.get_diff_files(base_branch)
-
-	if #files == 0 then
-		vim.notify("No changed files found", vim.log.levels.WARN)
+---@param base_branch string|nil
+function M.populate_from_git_diff(base_branch)
+	local repository_hint
+	if vim.bo.buftype == "" then
+		local current_path = vim.api.nvim_buf_get_name(0)
+		repository_hint = current_path ~= "" and current_path or nil
+	end
+	repository_hint = repository_hint or M.context.root
+	local entries, context_or_error = git.get_diff(base_branch, repository_hint)
+	if not entries then
+		vim.notify(context_or_error, vim.log.levels.ERROR)
 		return
 	end
-
-	-- Clear existing buffers
-	M.buffers = {}
-
-	-- Get diff stats for all files in one batch (more efficient)
-	local all_stats = {}
-	if config.options.git.show_diff_stats and git.current_merge_base then
-		all_stats = git.get_all_diff_stats(git.current_merge_base)
-	end
-
-	local added_count = 0
-	local skipped_count = 0
-
-	for _, filepath in ipairs(files) do
-		-- Check if file exists
-		local file_exists = vim.fn.filereadable(filepath) == 1
-		if file_exists then
-			-- Open or get buffer for the file
-			local buf_id = vim.fn.bufadd(filepath)
-			vim.fn.bufload(buf_id)
-
-			-- Get diff stats for this file
-			local stats = all_stats[filepath]
-
-			-- Add to review list with stats
-			if not utils.has_value(M.buffers, buf_id) then
-				table.insert(M.buffers, {
-					buf_id = buf_id,
-					is_marked = false,
-					filepath = filepath,
-					diff_stats = stats,
-				})
-				added_count = added_count + 1
-			end
-		else
-			skipped_count = skipped_count + 1
+	local context = context_or_error
+	local progress = {}
+	if M.context.merge_base == context.merge_base and M.context.head == context.head then
+		progress = reviewed_by_path(M.buffers)
+	elseif config.options.persistence.enable and config.options.persistence.auto_load then
+		local saved = M.load(context.root)
+		if saved and same_revision(saved, context) then
+			progress = reviewed_by_path(saved.files)
 		end
 	end
 
-	local current_branch = git.get_current_branch() or "current"
-	local base = base_branch or git.get_default_branch()
-
-	local message = string.format(
-		"Added %d file(s) to review (%s → %s)",
-		added_count,
-		base,
-		current_branch
-	)
-
-	if skipped_count > 0 then
-		message = message .. string.format(" | %d file(s) skipped (deleted)", skipped_count)
+	for _, entry in ipairs(entries) do
+		entry.is_marked = progress[entry.relative_path] == true
+		local existing = entry.status ~= "D" and vim.fn.bufnr(entry.filepath) or -1
+		entry.buf_id = existing > 0 and existing or nil
 	end
-
-	vim.notify(message, vim.log.levels.INFO)
-
-	-- Auto-save the new state
+	M.buffers = entries
+	M.context = context
 	M.auto_save()
-end
 
---- Populate review list from git diff
----@param base_branch string|nil Base branch to compare against
-function M.populate_from_git_diff(base_branch)
-	-- Check if we should auto-load existing state
-	if config.options.persistence.enable and config.options.persistence.auto_load then
-		local existing_state = M.load()
-		if existing_state and existing_state.files and #existing_state.files > 0 then
-			-- Ask user if they want to restore or start fresh
-			vim.ui.select(
-				{ "Restore previous review", "Start fresh" },
-				{ prompt = "Found saved review state:" },
-				function(choice)
-					if choice == "Restore previous review" then
-						M.restore()
-					else
-						-- Continue with fresh git diff
-						M.populate_from_git_diff_internal(base_branch)
-					end
-				end
-			)
-			return
-		end
+	local branch = git.get_current_branch(context.root) or context.head:sub(1, 8)
+	if #entries == 0 then
+		vim.notify(string.format("No changes found between %s and %s", context.base, branch), vim.log.levels.INFO)
+		return
 	end
-
-	M.populate_from_git_diff_internal(base_branch)
+	vim.notify(string.format("Loaded %d file(s) for review (%s → %s)", #entries, context.base, branch), vim.log.levels.INFO)
 end
 
---- Get the index of the current buffer in the review list
 ---@return number|nil
 function M.get_current_buffer_index()
+	M.cleanup_invalid_buffers()
 	local current_buffer = vim.api.nvim_get_current_buf()
-	for i, v in ipairs(M.buffers) do
-		if v.buf_id == current_buffer then
-			return i
+	local current_path = vim.api.nvim_buf_get_name(current_buffer)
+	if current_path ~= "" and vim.bo[current_buffer].buftype == "" then
+		current_path = utils.normalize(current_path)
+	end
+	for index, entry in ipairs(M.buffers) do
+		if entry.buf_id == current_buffer or (current_path ~= "" and entry.filepath == current_path) then
+			return index
 		end
 	end
 	return nil
 end
 
---- Get review statistics
----@return table {total: number, reviewed: number, additions: number, deletions: number}
+---@return table
 function M.get_stats()
-	local total = #M.buffers
-	local reviewed = 0
-	local total_additions = 0
-	local total_deletions = 0
-
-	for _, buffer in ipairs(M.buffers) do
-		if buffer.is_marked then
-			reviewed = reviewed + 1
+	local result = { total = #M.buffers, reviewed = 0, additions = 0, deletions = 0 }
+	for _, entry in ipairs(M.buffers) do
+		if entry.is_marked then
+			result.reviewed = result.reviewed + 1
 		end
-		if buffer.diff_stats then
-			total_additions = total_additions + buffer.diff_stats.additions
-			total_deletions = total_deletions + buffer.diff_stats.deletions
+		if entry.diff_stats and not entry.diff_stats.binary then
+			result.additions = result.additions + entry.diff_stats.additions
+			result.deletions = result.deletions + entry.diff_stats.deletions
 		end
 	end
-
-	return {
-		total = total,
-		reviewed = reviewed,
-		additions = total_additions,
-		deletions = total_deletions,
-	}
+	return result
 end
 
 return M

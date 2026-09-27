@@ -45,17 +45,7 @@ end, {
 	desc = "Populate review list from git diff (optional: specify base branch)",
 	nargs = "?",
 	complete = function()
-		-- Provide branch name completion
-		local handle = io.popen("git branch --format='%(refname:short)' 2>/dev/null")
-		if not handle then
-			return {}
-		end
-		local branches = {}
-		for line in handle:lines() do
-			table.insert(branches, line)
-		end
-		handle:close()
-		return branches
+		return require("review.git").get_branches()
 	end,
 })
 
@@ -72,8 +62,9 @@ end, {
 })
 
 vim.api.nvim_create_user_command("ReviewSave", function()
-	require("review").save_state()
-	vim.notify("Review state saved", vim.log.levels.INFO)
+	if require("review").save_state() then
+		vim.notify("Review state saved", vim.log.levels.INFO)
+	end
 end, {
 	desc = "Save review state to file",
 })

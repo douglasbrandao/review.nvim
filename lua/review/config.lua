@@ -18,10 +18,11 @@ M.defaults = {
 		width = 100,
 		height = 30,
 		border = "rounded",
+		show_help = true,
 	},
 	icons = {
-		reviewed = "✅",
-		not_reviewed = "❌",
+		reviewed = "✓",
+		not_reviewed = "○",
 	},
 	git = {
 		default_base = nil, -- nil means auto-detect (main/master)
@@ -29,9 +30,9 @@ M.defaults = {
 	},
 	persistence = {
 		enable = true, -- Enable automatic state persistence
-		filename = ".review-state.json", -- State file name (relative to git root)
+		filename = nil, -- nil stores state under stdpath("state")/review.nvim
 		auto_save = true, -- Auto-save on buffer mark/unmark
-		auto_load = true, -- Auto-load state when git diff is populated
+		auto_load = true, -- Reuse progress when the compared commit is unchanged
 	},
 }
 
@@ -41,7 +42,8 @@ M.options = vim.deepcopy(M.defaults)
 --- Setup configuration with user options
 ---@param user_config table|nil User configuration to merge with defaults
 function M.setup(user_config)
-	M.options = vim.tbl_deep_extend("force", M.defaults, user_config or {})
+	M.options = vim.tbl_deep_extend("force", vim.deepcopy(M.defaults), user_config or {})
+	return M.options
 end
 
 return M

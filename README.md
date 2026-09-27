@@ -1,30 +1,32 @@
 # review.nvim
 
-A Neovim plugin for tracking code review progress. Keep track of which files you've reviewed in a branch, navigate between unreviewed files, and persist your review state across sessions.
+`review.nvim` is a small Neovim workflow for reviewing the files changed by a Git branch. It builds a checklist from the branch diff, keeps progress between sessions, and lets you move through pending files without leaving the editor.
 
-## Features
+## What it does
 
-- **Git Integration** - Automatically load changed files from git diff
-- **Review Tracking** - Mark files as reviewed/not reviewed with visual indicators
-- **Quick Navigation** - Jump between unreviewed files with keymaps
-- **Diff Stats** - See additions/deletions (+/-) for each file
-- **State Persistence** - Save and restore review progress between sessions
-- **Floating Window UI** - Clean interface showing review progress
+- compares `HEAD` with the merge-base of `main`, `master`, or the remote default branch;
+- tracks modified, added, renamed, copied, and deleted files;
+- shows per-file and total addition/deletion counts;
+- opens deleted files from the merge-base snapshot;
+- jumps forward or backward through pending files, with wraparound;
+- restores progress only when `HEAD` and the merge-base still match, avoiding stale “reviewed” marks;
+- stores state outside the repository by default, so it does not dirty `git status`;
+- uses argument-based Git calls, so branch names and paths are not evaluated by a shell.
+
+Requires Neovim 0.10+ and Git.
 
 ## Installation
 
-### [lazy.nvim](https://github.com/folke/lazy.nvim)
+With [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 ```lua
 {
   "douglasbrandao/review.nvim",
-  config = function()
-    require("review").setup()
-  end,
+  opts = {},
 }
 ```
 
-### [packer.nvim](https://github.com/wbthomason/packer.nvim)
+With [packer.nvim](https://github.com/wbthomason/packer.nvim):
 
 ```lua
 use {
@@ -35,149 +37,113 @@ use {
 }
 ```
 
-## Configuration
+Calling `setup()` is optional; defaults are installed on `VimEnter` when no explicit setup was made.
 
-Here is the default configuration:
+## Workflow
+
+1. Run `:ReviewGitDiff`, optionally followed by a base branch such as `origin/main`.
+2. Open the list with `<leader>rl`.
+3. Press `<CR>` to open a file or `x`/`Space` to toggle it directly in the list.
+4. Use `<leader>rn` and `<leader>rp` to move between pending files.
+5. Toggle the current file with `<leader>rx`.
+
+The diff represents committed branch changes from the merge-base through `HEAD`. Refreshing it on the same revision retains progress. A new commit starts a fresh checklist so changes are not accidentally treated as reviewed.
+
+The list uses Git's familiar status letters (`A`, `M`, `R`, `C`, `D`) and displays repository-relative paths. Its size is automatically capped to the current editor dimensions.
+
+### List keymaps
+
+| Key | Action |
+| --- | --- |
+| `<CR>` | Open the selected file |
+| `x`, `<Space>` | Toggle the selected file |
+| `q`, `<Esc>` | Close the list |
+
+## Commands
+
+| Command | Description |
+| --- | --- |
+| `:ReviewGitDiff [base]` | Load or refresh the branch diff; base branches are completed |
+| `:ReviewList` | Open the review list |
+| `:ReviewToggle` | Toggle the current file |
+| `:ReviewNext` | Open the next pending file |
+| `:ReviewPrev` | Open the previous pending file |
+| `:ReviewAdd` | Add the current file manually |
+| `:ReviewRemove` | Remove the current file |
+| `:ReviewClear` | Empty the in-memory review list |
+| `:ReviewSave` | Save progress immediately |
+| `:ReviewLoad` | Restore saved progress |
+| `:ReviewClearState` | Delete saved progress |
+
+## Configuration
 
 ```lua
 require("review").setup({
   keymaps = {
     enable = true,
-    insert = "<leader>ri",         -- Add current buffer to review list
-    remove = "<leader>rr",         -- Remove current buffer from review list
-    list = "<leader>rl",           -- Show review list
-    toggle_reviewed = "<leader>rx", -- Toggle reviewed status
-    git_diff = "<leader>rg",       -- Load files from git diff
-    next_unreviewed = "<leader>rn", -- Go to next unreviewed file
-    prev_unreviewed = "<leader>rp", -- Go to previous unreviewed file
+    insert = "<leader>ri",
+    remove = "<leader>rr",
+    list = "<leader>rl",
+    toggle_reviewed = "<leader>rx",
+    git_diff = "<leader>rg",
+    next_unreviewed = "<leader>rn",
+    prev_unreviewed = "<leader>rp",
   },
   window = {
     width = 100,
     height = 30,
     border = "rounded",
+    show_help = true,
   },
   icons = {
-    reviewed = "✅",
-    not_reviewed = "❌",
+    reviewed = "✓",
+    not_reviewed = "○",
   },
   git = {
-    default_base = nil,            -- nil means auto-detect (main/master)
-    show_diff_stats = true,        -- Show +/- line stats in the list
+    default_base = nil, -- auto-detect origin/HEAD, main, or master
+    show_diff_stats = true,
   },
   persistence = {
-    enable = true,                 -- Enable automatic state persistence
-    filename = ".review-state.json", -- State file name (relative to git root)
-    auto_save = true,              -- Auto-save on buffer mark/unmark
-    auto_load = true,              -- Auto-load state when git diff is populated
+    enable = true,
+    filename = nil, -- nil: stdpath("state")/review.nvim/<repository-hash>.json
+    auto_save = true,
+    auto_load = true,
   },
 })
 ```
 
-## Usage
+Set an individual keymap to `false` to omit it. Setting `persistence.filename` to a relative path stores the file under the repository root; an absolute path is also accepted.
 
-### Basic Workflow
+The highlight groups `ReviewDone`, `ReviewPending`, `ReviewAdded`, `ReviewDeleted`, and `ReviewHelp` can be customized by a colorscheme or user configuration.
 
-1. **Load files from git diff:**
-   ```
-   :ReviewGitDiff
-   ```
-   Or press `<leader>rg` to load all changed files in the current branch compared to main/master.
-
-2. **Navigate through files:**
-   - `<leader>rn` - Go to next unreviewed file
-   - `<leader>rp` - Go to previous unreviewed file
-
-3. **Mark files as reviewed:**
-   - `<leader>rx` - Toggle reviewed status on current file
-
-4. **View progress:**
-   - `<leader>rl` - Open the review list window
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `:ReviewAdd` | Add current buffer to review list |
-| `:ReviewRemove` | Remove current buffer from review list |
-| `:ReviewList` | Show all buffers in review list |
-| `:ReviewToggle` | Toggle reviewed status of current buffer |
-| `:ReviewClear` | Clear all buffers from review list |
-| `:ReviewGitDiff [branch]` | Populate review list from git diff (optional: specify base branch) |
-| `:ReviewNext` | Go to next unreviewed file |
-| `:ReviewPrev` | Go to previous unreviewed file |
-| `:ReviewSave` | Manually save review state |
-| `:ReviewLoad` | Load review state from file |
-| `:ReviewClearState` | Delete saved review state file |
-
-### Review List Window
-
-The review list shows:
-- Progress indicator: `Review List - 3/10 (30%)`
-- Total diff stats: `+150 -42`
-- File list with status icons and individual diff stats
-
-**Keymaps in the review window:**
-- `<CR>` - Jump to the selected file
-- `q` - Close the window
-
-## API
-
-You can also use the plugin programmatically:
+## Lua API
 
 ```lua
 local review = require("review")
 
--- Add/remove buffers
+review.populate_from_git_diff("main") -- nil enables base auto-detection
+review.show_buffers()
 review.mark_buffer()
 review.unmark_buffer()
-
--- Toggle reviewed status
 review.mark_file_as_reviewed()
-
--- Navigation
 review.goto_next_unreviewed()
 review.goto_prev_unreviewed()
-
--- Git integration
-review.populate_from_git_diff("main")  -- or nil for auto-detect
-
--- State management
 review.save_state()
 review.load_state()
 review.clear_state()
 review.clear_all_buffers()
-
--- Show UI
-review.show_buffers()
 ```
 
-## Project Structure
+## Development
 
-```
-lua/review/
-├── init.lua       # Main module and public API
-├── config.lua     # Default configuration
-├── state.lua      # State management and persistence
-├── git.lua        # Git integration
-├── navigation.lua # Navigation between files
-├── ui.lua         # Floating window UI
-└── utils.lua      # Utility functions
+Run the headless integration suite with:
+
+```sh
+make test
 ```
 
-## State Persistence
-
-Review state is automatically saved to `.review-state.json` in the git root directory. This allows you to:
-
-- Close Neovim and resume your review later
-- Share review progress (if you choose to commit the file)
-- Track which files you've already reviewed
-
-The state file is automatically created when you use `:ReviewGitDiff` and is updated whenever you mark/unmark files.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
+The suite creates a temporary Git repository and covers modified paths with spaces, renames, deletions, diff statistics, deleted-file previews, persistence, and safe refresh behavior.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE).
